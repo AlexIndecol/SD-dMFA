@@ -1,0 +1,123 @@
+# SD–dMFA Coupled Modeling Template (flodym + BPTK-Py)
+
+Starter repository for building a **coupled dynamic Material Flow Analysis (dMFA)** and **System Dynamics (SD)** model to assess how **circularity strategies** affect **criticality** and **resilience/service** indicators.
+
+## What’s implemented
+
+- **dMFA (flodym)**: cohort-based lifetimes (`weibull`/`lognormal`/`fixed`), collection routing (recycling/remanufacturing/disposal), explicit new-scrap vs old-scrap accounting, refinery stockpile dynamics, and refining-anchored primary availability with explicit upstream yields/losses.
+- **SD (BPTK-Py)**: demand is driven by an **exogenous desired-demand** series; **demand response is OFF** before the reporting window and can be **ON** during reporting via price elasticity.
+- **Coupling**: **loose iterative coupling** with two feedback signals (`service_stress`, `circular_supply_stress`) combined into an effective stress multiplier (SD demand response receives the multiplier; dMFA provides both stress signals).
+
+## Locked project choices
+
+- Materials: **tin, zinc, nickel**
+- Regions: **EU27, China, RoW**
+- End-uses: 7 sectors (see `configs/end_use.yml`)
+- Canonical dimension symbols: `t` (time), `r` (region), `m` (material), `e` (end_use), `ed` (end_use_detailed), `p` (stage), `q` (quality); optional OD-trade placeholders: `c` (commodity), `o` (origin region), `d` (destination region)
+- Exogenous inputs (one file per variable): `data/exogenous/*.csv` with schema defined in `registry/variable_registry.yml`
+- Time horizon: **1870–2100**, with **calibration 1870–2019** and **reporting 2020–2100** (see `configs/time.yml`)
+- Always **loose iterative coupling** (see `configs/coupling.yml`)
+- dMFA stages/links/stocks are defined in `configs/stages.yml` (process names can be renamed via roles)
+
+Documentation entrypoint: `docs/README.md`.
+See `docs/governance/DECISION_LOG.md` for decisions, `docs/workflows/SCENARIOS.md` for scenario implementation rules, `docs/workflows/CALIBRATION.md` for calibration clarifications, and `docs/governance/ASSUMPTIONS.md` for open assumptions.
+
+## Requirements
+
+- Python **>= 3.11**
+
+## Quickstart
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# choose a run config (example)
+CONFIG=configs/runs/mvp.yml
+
+# Validate exogenous inputs against the registry + dimensions
+python scripts/validation/validate_exogenous_inputs.py --config "$CONFIG"
+
+# Reporting run (1870–2100 simulated; results reported for 2020–2100)
+python -m crm_model.cli --config "$CONFIG" --variant baseline --phase reporting --save-csv
+
+# Calibration run (1870–2019)
+python -m crm_model.cli --config "$CONFIG" --variant baseline --phase calibration --save-csv
+```
+
+### Scenario modelling (all configured variants)
+
+```bash
+for VARIANT in $(python - <<'PY'
+import os
+from crm_model.common.io import load_run_config
+print(" ".join(load_run_config(os.environ["CONFIG"]).variants.keys()))
+PY
+); do
+  python -m crm_model.cli --config "$CONFIG" --variant "$VARIANT" --phase reporting --save-csv
+done
+
+# Build comparison package from latest run per variant
+python scripts/analysis/compare_scenarios.py --config "$CONFIG"
+
+# Build visual subset-panel comparison from latest precomputed scenario runs
+python scripts/analysis/plot_scenario_subset_panels.py --config "$CONFIG"
+```
+
+### Calibration cycle (baseline -> calibration -> baseline)
+
+```bash
+python scripts/calibration/calibrate_model.py --config "$CONFIG" --calibration-spec configs/calibration.yml
+python scripts/calibration/calibration_cycle.py promote --config "$CONFIG" --patch outputs/runs/calibration/<config_stem>/baseline/<timestamp>/best_config_patch.yml
+# optional rollback:
+# python scripts/calibration/calibration_cycle.py restore --config "$CONFIG" --snapshot outputs/runs/calibration/cycle/<config_stem>/<timestamp>/baseline_before.yml
+```
+
+## Inputs you should replace early
+
+The template ships with **synthetic placeholder data** in `data/exogenous/`.
+Replace these with real datasets before drawing conclusions:
+
+- `data/exogenous/final_demand.csv`
+- `data/exogenous/end_use_shares.csv`
+- `data/exogenous/primary_refined_output.csv`
+- `data/exogenous/primary_refined_net_imports.csv`
+- `data/exogenous/stage_yields_losses.csv`
+- `data/exogenous/collection_routing_rates.csv` (`recycling_rate`, `remanufacturing_rate`, `disposal_rate`)
+- `data/exogenous/remanufacturing_end_use_eligibility.csv` (`value` in [0,1] by year/region/end_use)
+- `data/exogenous/lifetime_distributions.csv`
+- `data/exogenous/stock_in_use.csv` (optional; calibration only)
+
+Schemas are documented in `data/README.md` and enforced by `registry/variable_registry.yml`.
+
+## Repo layout
+
+- `configs/` – split config blocks (`time.yml`, `regions.yml`, `materials.yml`, `end_use.yml`, `stages.yml`, …)
+- `configs/runs/_core.yml` – shared canonical run core (base parameters/includes)
+- `configs/base.yml` – deprecated compatibility shim (temporary)
+- `configs/scenarios/mvp/*.yml` – scenario-file sets loaded via `includes.scenarios`
+- `configs/runs/mvp.yml` – thin overlay run config (`extends: ./_core.yml`)
+- `configs/regions.yml`, `configs/materials.yml`, `configs/end_use.yml`, `configs/stages.yml`, `configs/qualities.yml` – split-layout single sources
+- `registry/` – exogenous variable registry (file paths + schema)
+- `data/exogenous/` – exogenous inputs (one variable per file)
+- `data/raw/`, `data/processed/`, `data/external/` – data-lake scaffold for future ingestion/ETL separation
+- `src/crm_model/` – canonical model code
+- `scripts/run_one.py` – thin wrapper for one CLI run (`python -m crm_model.cli`)
+- `scripts/run_batch.py` – batch wrapper to run all/selected variants and optional compare step
+- `scripts/calibration/` – calibration and promotion workflow
+- `scripts/validation/` – exogenous input validation
+- `scripts/validation/lint_run_configs.py` – run-config structure/canonical-key lint
+- `scripts/analysis/` – comparison and plotting utilities
+- `scripts/data/` – data processing utilities
+- `outputs/runs/<config_stem>/<variant>/` – scenario run artifacts
+- `outputs/runs/calibration/` – calibration artifacts
+- `outputs/runs/calibration/cycle/` – baseline promotion/restore snapshots
+- `outputs/analysis/` – derived comparisons and figures
+- `docs/` – documentation hub and structured subfolders:
+  - `docs/getting-started/` (quickstart, troubleshooting)
+  - `docs/model/` (architecture, SD loop, indicators, outputs, glossary, flowchart)
+  - `docs/workflows/` (scenarios, calibration, config precedence)
+  - `docs/governance/` (assumptions, risks, decision log, changelog)
+  - `docs/internal/` (agent playbook)
+- `tests/` – smoke tests
